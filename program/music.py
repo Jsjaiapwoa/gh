@@ -1,56 +1,48 @@
-# Copyright (C) 2021 By Veez Music-Project
-# Commit Start Date 20/10/2021
-# Finished On 28/10/2021
-
-# pyrogram stuff
-import traceback
-
-from pyrogram import Client
-from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
-from pyrogram.types import InlineKeyboardMarkup, Message
-# pytgcalls stuff
-from pytgcalls import idle
+import os
+import io
+from os import path
+from pyrogram import Client, filters
+from pyrogram.types import Message, Voice, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.errors import UserAlreadyParticipant
+from callsmusic import callsmusic, queues
+from callsmusic.callsmusic import client as USER
+from helpers.admins import get_administrators
+import requests
+import aiohttp
+from youtube_search import YoutubeSearch
+import converter
+from datetime import datetime
+from time import time
+from downloaders import youtube
+from config import DURATION_LIMIT, BOT_USERNAME, GROUP_SUPPORT
+from helpers.filters import command
+from helpers.decorators import authorized_users_only, errors
+from helpers.errors import DurationLimitError
+from helpers.gets import get_url, get_file_name
+import aiofiles
+import ffmpeg
+from PIL import Image, ImageFont, ImageDraw
 from pytgcalls import StreamType
-from pytgcalls.types.input_stream import AudioPiped
-from pytgcalls.types.input_stream.quality import HighQualityAudio
-# repository stuff
-from driver.decorators import require_admin, check_blacklist
-from program.utils.inline import stream_markup
-from driver.design.thumbnail import thumb
-from driver.design.chatname import CHAT_TITLE
-from driver.filters import command, other_filters
-from driver.queues import QUEUE, add_to_queue
-from driver.core import calls, user, me_user
-from driver.utils import bash, remove_if_exists, from_tg_get_msg
-from driver.database.dbqueue import add_active_chat, remove_active_chat, music_on
-from config import BOT_USERNAME, IMG_5
-# youtube-dl stuff
-from youtubesearchpython import VideosSearch
+from pytgcalls.types.input_stream import InputAudioStream
+from pytgcalls.types.input_stream import InputStream
 
 
-def ytsearch(query: str):
-    try:
-        search = VideosSearch(query, limit=1).result()
-        data = search["result"][0]
-        songname = data["title"]
-        url = data["link"]
-        duration = data["duration"]
-        thumbnail = data["thumbnails"][0]["url"]
-        return [songname, url, duration, thumbnail]
-    except Exception as e:
-        print(e)
-        return 0
+
+# plus
+chat_id = None
+DISABLED_GROUPS = []
+useer = "NaN"
+ACTV_CALLS = []
+  
+
+def transcode(filename):
+    ffmpeg.input(filename).output(
+        "input.raw", format="s16le", acodec="pcm_s16le", ac=2, ar="48k"
+    ).overwrite_output().run()
+    os.remove(filename)
 
 
-async def ytdl(link: str):
-    stdout, stderr = await bash(
-        f'yt-dlp --geo-bypass -g -f "best[height<=?720][width<=?1280]/best" {link}'
-    )
-    if stdout:
-        return 1, stdout
-    return 0, stderr
-
-
+# Convert seconds to mm:ss
 def convert_seconds(seconds):
     seconds = seconds % (24 * 3600)
     seconds %= 3600
@@ -59,300 +51,317 @@ def convert_seconds(seconds):
     return "%02d:%02d" % (minutes, seconds)
 
 
-async def play_tg_file(c: Client, m: Message, replied: Message = None, link: str = None):
-    chat_id = m.chat.id
-    user_id = m.from_user.id
-    if link:
-        try:
-            replied = await from_tg_get_msg(link)
-        except Exception as e:
-            traceback.print_exc()
-            return await m.reply_text(f"🚫 error:\n\n» {e}")
-    if not replied:
-        return await m.reply(
-            "» reply to an **audio file** or **give something to search.**"
-        )
-    if replied.audio or replied.voice:
-        if not link:
-            suhu = await replied.reply("📥 downloading audio...")
-        else:
-            suhu = await m.reply("📥 downloading audio...")
-        dl = await replied.download()
-        link = replied.link
-        songname = "Audio"
-        thumbnail = f"{IMG_5}"
-        duration = "00:00"
-        try:
-            if replied.audio:
-                if replied.audio.title:
-                    songname = replied.audio.title[:80]
-                else:
-                    songname = replied.audio.file_name[:80]
-                if replied.audio.thumbs:
-                    if not link:
-                        thumbnail = await c.download_media(replied.audio.thumbs[0].file_id)
-                    else:
-                        thumbnail = await user.download_media(replied.audio.thumbs[0].file_id)
-                duration = convert_seconds(replied.audio.duration)
-            elif replied.voice:
-                songname = "Voice Note"
-                duration = convert_seconds(replied.voice.duration)
-        except BaseException:
-            pass
-        # recheck
-        if not thumbnail:
-            thumbnail = f"{IMG_5}"
-
-        if chat_id in QUEUE:
-            await suhu.edit("🔄 Queueing Track...")
-            gcname = m.chat.title
-            ctitle = await CHAT_TITLE(gcname)
-            title = songname
-            userid = m.from_user.id
-            image = await thumb(thumbnail, title, userid, ctitle)
-            pos = add_to_queue(chat_id, songname, dl, link, "Audio", 0)
-            requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-            buttons = stream_markup(user_id)
-            await suhu.delete()
-            await m.reply_photo(
-                photo=image,
-                reply_markup=InlineKeyboardMarkup(buttons),
-                caption=f"💡 **Track added to queue »** `{pos}`\n\n"
-                        f"🗂 **Name:** [{songname}]({link}) | `music`\n"
-                        f"⏱️ **Duration:** `{duration}`\n"
-                        f"🧸 **Request by:** {requester}",
-            )
-            remove_if_exists(image)
-        else:
-            try:
-                gcname = m.chat.title
-                ctitle = await CHAT_TITLE(gcname)
-                title = songname
-                userid = m.from_user.id
-                image = await thumb(thumbnail, title, userid, ctitle)
-                await suhu.edit("🔄 Joining Group Call...")
-                await music_on(chat_id)
-                await add_active_chat(chat_id)
-                await calls.join_group_call(
-                    chat_id,
-                    AudioPiped(
-                        dl,
-                        HighQualityAudio(),
-                    ),
-                    stream_type=StreamType().pulse_stream,
-                )
-                add_to_queue(chat_id, songname, dl, link, "Audio", 0)
-                await suhu.delete()
-                buttons = stream_markup(user_id)
-                requester = (
-                    f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-                )
-                await m.reply_photo(
-                    photo=image,
-                    reply_markup=InlineKeyboardMarkup(buttons),
-                    caption=f"🗂 **Name:** [{songname}]({link}) | `music`\n"
-                            f"⏱️ **Duration:** `{duration}`\n"
-                            f"🧸 **Request by:** {requester}",
-                )
-                await idle()
-                remove_if_exists(image)
-            except Exception as e:
-                await suhu.delete()
-                await remove_active_chat(chat_id)
-                traceback.print_exc()
-                await m.reply_text(f"🚫 error:\n\n» {e}")
-    else:
-        await m.reply(
-            "» reply to an **audio file** or **give something to search.**"
-        )
+# Convert hh:mm:ss to seconds
+def time_to_seconds(time):
+    stringt = str(time)
+    return sum(int(x) * 60 ** i for i, x in enumerate(reversed(stringt.split(":"))))
 
 
-@Client.on_message(command(["play", f"play@{BOT_USERNAME}"]) & other_filters)
-@check_blacklist()
-@require_admin(permissions=["can_manage_voice_chats", "can_delete_messages", "can_invite_users"], self=True)
-async def play(c: Client, m: Message):
-    await m.delete()
-    replied = m.reply_to_message
-    chat_id = m.chat.id
-    user_id = m.from_user.id
-    if m.sender_chat:
-        return await m.reply_text(
-            "you're an __Anonymous__ user !\n\n» revert back to your real user account to use this bot."
-        )
+# Change image size
+def changeImageSize(maxWidth, maxHeight, image):
+    widthRatio = maxWidth / image.size[0]
+    heightRatio = maxHeight / image.size[1]
+    newWidth = int(widthRatio * image.size[0])
+    newHeight = int(heightRatio * image.size[1])
+    newImage = image.resize((newWidth, newHeight))
+    return newImage
+
+
+async def generate_cover(requested_by, title, views, duration, thumbnail):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(thumbnail) as resp:
+            if resp.status == 200:
+                f = await aiofiles.open("background.png", mode="wb")
+                await f.write(await resp.read())
+                await f.close()
+
+    image1 = Image.open("./background.png")
+    FOREGROUND_THUMBNAIL = random.choice(FOREGROUND_IMG)
+    image2 = Image.open(FOREGROUND_THUMBNAIL)
+    image3 = changeImageSize(1280, 720, image1)
+    image4 = changeImageSize(1280, 720, image2)
+    image5 = image3.convert("RGBA")
+    image6 = image4.convert("RGBA")
+    Image.alpha_composite(image5, image6).save("temp.png")
+    img = Image.open("temp.png")
+    draw = ImageDraw.Draw(img)
+    font = ImageFont.truetype("etc/regular.ttf", 52)
+    font2 = ImageFont.truetype("etc/medium.ttf", 76)     
+    draw.text((27, 535), f"Powered By: PratheekBots...", fill="black", font=font)
+    draw.text((25, 610), f"{title[:18]}...", fill= "black", font=font2)
+    img.save("final.png")
+    os.remove("temp.png")
+    os.remove("background.png")
+
+@Client.on_message(
+    command("Maintainence") & ~filters.edited & ~filters.bot & ~filters.private
+)
+@authorized_users_only
+async def hfmm(_, message):
+    global DISABLED_GROUPS
     try:
-        ubot = me_user.id
-        b = await c.get_chat_member(chat_id, ubot)
-        if b.status == "kicked":
-            await c.unban_chat_member(chat_id, ubot)
-            invitelink = (await c.get_chat(chat_id)).invite_link
-            if not invitelink:
-                await c.export_chat_invite_link(chat_id)
-                invitelink = (await c.get_chat(chat_id)).invite_link
-            if invitelink.startswith("https://t.me/+"):
-                invitelink = invitelink.replace(
-                    "https://t.me/+", "https://t.me/joinchat/"
-                )
-            await user.join_chat(invitelink)
-            await remove_active_chat(chat_id)
-    except UserNotParticipant:
-        try:
-            invitelink = (await c.get_chat(chat_id)).invite_link
-            if not invitelink:
-                await c.export_chat_invite_link(chat_id)
-                invitelink = (await c.get_chat(chat_id)).invite_link
-            if invitelink.startswith("https://t.me/+"):
-                invitelink = invitelink.replace(
-                    "https://t.me/+", "https://t.me/joinchat/"
-                )
-            await user.join_chat(invitelink)
-            await remove_active_chat(chat_id)
-        except UserAlreadyParticipant:
-            pass
-        except Exception as e:
-            traceback.print_exc()
-            return await m.reply_text(
-                f"❌ **userbot failed to join**\n\n**reason**: `{e}`"
-            )
-    if replied:
-        if replied.audio or replied.voice:
-            await play_tg_file(c, m, replied)
-        else:
-            if len(m.command) < 2:
-                await m.reply(
-                    "» reply to an **audio file** or **give something to search.**"
-                )
-            else:
-                suhu = await c.send_message(chat_id, "🔍 **Loading...**")
-                query = m.text.split(None, 1)[1]
-                search = ytsearch(query)
-                if search == 0:
-                    await suhu.edit("❌ **no results found.**")
-                else:
-                    songname = search[0]
-                    title = search[0]
-                    url = search[1]
-                    duration = search[2]
-                    thumbnail = search[3]
-                    userid = m.from_user.id
-                    gcname = m.chat.title
-                    ctitle = await CHAT_TITLE(gcname)
-                    image = await thumb(thumbnail, title, userid, ctitle)
-                    veez, ytlink = await ytdl(url)
-                    if veez == 0:
-                        await suhu.edit(f"❌ yt-dl issues detected\n\n» `{ytlink}`")
-                    else:
-                        if chat_id in QUEUE:
-                            await suhu.edit("🔄 Queueing Track...")
-                            pos = add_to_queue(
-                                chat_id, songname, ytlink, url, "Audio", 0
-                            )
-                            await suhu.delete()
-                            buttons = stream_markup(user_id)
-                            requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-                            await m.reply_photo(
-                                photo=image,
-                                reply_markup=InlineKeyboardMarkup(buttons),
-                                caption=f"💡 **Track added to queue »** `{pos}`\n\n🗂 **Name:** [{songname}]({url}) | `music`\n**⏱ Duration:** `{duration}`\n🧸 **Request by:** {requester}",
-                            )
-                            remove_if_exists(image)
-                        else:
-                            try:
-                                await suhu.edit("🔄 Joining Group Call...")
-                                await music_on(chat_id)
-                                await add_active_chat(chat_id)
-                                await calls.join_group_call(
-                                    chat_id,
-                                    AudioPiped(
-                                        ytlink,
-                                        HighQualityAudio(),
-                                    ),
-                                    stream_type=StreamType().local_stream,
-                                )
-                                add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
-                                await suhu.delete()
-                                buttons = stream_markup(user_id)
-                                requester = (
-                                    f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-                                )
-                                await m.reply_photo(
-                                    photo=image,
-                                    reply_markup=InlineKeyboardMarkup(buttons),
-                                    caption=f"🗂 **Name:** [{songname}]({url}) | `music`\n**⏱ Duration:** `{duration}`\n🧸 **Request by:** {requester}",
-                                )
-                                await idle()
-                                remove_if_exists(image)
-                            except Exception as ep:
-                                await suhu.delete()
-                                await remove_active_chat(chat_id)
-                                await m.reply_text(f"🚫 error: `{ep}`")
+        user_id = message.from_user.id
+    except:
+        return
+    if len(message.command) != 2:
+        await message.reply_text(
+            "**I only recognize `/Maintainence on` and `/Maintainence off` only**"
+        )
+        return
+    status = message.text.split(None, 1)[1]
+    message.chat.id
+    if status in ["OFF", "Off", "off"]:
+        lel = await message.reply("**Processing...**")
+        if message.chat.id not in DISABLED_GROUPS:
+            await lel.edit("**👍🏻 This Chat Is Not In Maintainence Mode**")
+            return
+        DISABLED_GROUPS.remove(message.chat.id)
+        await lel.edit(
+            f"**❌ Maintainence Mode disabled In {message.chat.title} Chat**"
+        )
 
+    elif status in ["ON", "On", "on"]:
+        lel = await message.reply("**Processing...**")
+
+        if message.chat.id in DISABLED_GROUPS:
+            await lel.edit("**Maintainence Mode  Already Active In This Chat**")
+            return
+        DISABLED_GROUPS.append(message.chat.id)
+        await lel.edit(
+            f"**✅ Maintainence Mode Is Now Enabled In {message.chat.title} Chat**"
+        )
     else:
-        if len(m.command) < 2:
-            await m.reply(
-                "» reply to an **audio file** or **give something to search.**"
+        await message.reply_text(
+            "**⚙️ I Only Recognize `/Maintainence on` and `/Maintainence off` Only**"
+        )
+
+
+@Client.on_message(
+    command("play")
+    & filters.group
+    & ~filters.edited
+    & ~filters.forwarded
+    & ~filters.via_bot
+)
+async def play(_, message: Message):
+    
+    global que
+    global useer
+    if message.chat.id in DISABLED_GROUPS:
+        await message.reply("**🛠️ Maintainence Mode Is On, Ask Admin To Disable It!**")
+        return
+    lel = await message.reply("🔎")
+
+    administrators = await get_administrators(message.chat)
+    chid = message.chat.id
+
+    try:
+        user = await USER.get_me()
+    except:
+        user.first_name = "pratheek06"
+    usar = user
+    wew = usar.id
+    try:
+        await _.get_chat_member(chid, wew)
+    except:
+        for administrator in administrators:
+            if administrator == message.from_user.id:
+                try:
+                    invitelink = await _.export_chat_invite_link(chid)
+                except:
+                    await lel.edit("⚠️ **ᴘʀᴏᴍᴏᴛᴇ ᴍᴇ ᴀs ᴀᴅᴍɪɴ ғɪʀsᴛ ⚠️**")
+                    return
+
+                try:
+                    await USER.join_chat(invitelink)
+                    await USER.send_message(
+                        message.chat.id, "**ᴘʀᴀᴛʜᴇᴇᴋ's ᴀssɪsᴛᴀɴᴛ ᴊᴏɪɴᴇᴅ 👍🏻 ɴᴏᴡ ᴘʟᴀʏ ʏᴏᴜʀ ᴍᴜsɪᴄ ғʀᴇᴇʟʏ** ❣️"
+                    )
+
+                except UserAlreadyParticipant:
+                    pass
+                except Exception:
+                    await lel.edit(
+                        f"⚠️ **ғʟᴏᴏᴅ ᴡᴀɪᴛ ᴇʀʀᴏʀ ⚠️ ᴄʜᴇᴄᴋ ᴍᴀʏʙᴇ ᴘʀᴀᴛʜᴇᴇᴋ's ᴀssɪᴛᴀɴᴛ ɪs ʙᴀɴɴᴇᴅ ᴏʀ ɴᴏᴛ ᴀᴠᴀɪʟᴀʙʟᴇ ɪɴ ᴛʜɪs ᴄʜᴀᴛ**."
+                    )
+    try:
+        await USER.get_chat(chid)
+    except:
+        await lel.edit(
+            f"😒 **ᴘʀᴀᴛʜᴇᴇᴋ's ᴀssɪsᴛᴀɴᴛ ɴᴏᴛ ᴀᴠᴀɪʟᴀʙʟᴇ ɪɴ ᴛʜɪs ᴄʜᴀᴛ sᴏ sᴇɴᴅ /play ᴄᴏᴍᴍᴀɴᴅ ғɪʀsᴛ ᴛᴏ ᴊᴏɪɴ ᴀssɪsᴛᴀɴᴛ ʜᴇʀᴇ**."
+        )
+        return
+
+    audio = (
+        (message.reply_to_message.audio or message.reply_to_message.voice)
+        if message.reply_to_message
+        else None
+    )
+    url = get_url(message)
+
+    if audio:
+        if round(audio.duration / 60) > DURATION_LIMIT:
+            raise DurationLimitError(
+                f"🙃 **ʜᴇʏ ʏᴏᴜʀ sᴏɴɢ ᴅᴜʀᴀᴛɪᴏɴ ɪs {DURATION_LIMIT} ᴍɪɴᴜᴛᴇs, & ᴛʜɪs ɪs ɴᴏᴛ ᴀʟʟᴏᴡ ᴛᴏ ᴘʟᴀʏ** ️🤞."
             )
-        elif "t.me" in m.command[1]:
-            for i in m.command[1:]:
-                if "t.me" in i:
-                    await play_tg_file(c, m, link=i)
-                continue
-        else:
-            suhu = await c.send_message(chat_id, "🔍 **Loading...**")
-            query = m.text.split(None, 1)[1]
-            search = ytsearch(query)
-            if search == 0:
-                await suhu.edit("❌ **no results found.**")
-            else:
-                songname = search[0]
-                title = search[0]
-                url = search[1]
-                duration = search[2]
-                thumbnail = search[3]
-                userid = m.from_user.id
-                gcname = m.chat.title
-                ctitle = await CHAT_TITLE(gcname)
-                image = await thumb(thumbnail, title, userid, ctitle)
-                veez, ytlink = await ytdl(url)
-                if veez == 0:
-                    await suhu.edit(f"❌ yt-dl issues detected\n\n» `{ytlink}`")
-                else:
-                    if chat_id in QUEUE:
-                        await suhu.edit("🔄 Queueing Track...")
-                        pos = add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
-                        await suhu.delete()
-                        requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-                        buttons = stream_markup(user_id)
-                        await m.reply_photo(
-                            photo=image,
-                            reply_markup=InlineKeyboardMarkup(buttons),
-                            caption=f"💡 **Track added to queue »** `{pos}`\n\n🗂 **Name:** [{songname}]({url}) | `music`\n**⏱ Duration:** `{duration}`\n🧸 **Request by:** {requester}",
-                        )
-                        remove_if_exists(image)
-                    else:
-                        try:
-                            await suhu.edit("🔄 Joining Group Call...")
-                            await music_on(chat_id)
-                            await add_active_chat(chat_id)
-                            await calls.join_group_call(
-                                chat_id,
-                                AudioPiped(
-                                    ytlink,
-                                    HighQualityAudio(),
-                                ),
-                                stream_type=StreamType().local_stream,
-                            )
-                            add_to_queue(chat_id, songname, ytlink, url, "Audio", 0)
-                            await suhu.delete()
-                            requester = f"[{m.from_user.first_name}](tg://user?id={m.from_user.id})"
-                            buttons = stream_markup(user_id)
-                            await m.reply_photo(
-                                photo=image,
-                                reply_markup=InlineKeyboardMarkup(buttons),
-                                caption=f"🗂 **Name:** [{songname}]({url}) | `music`\n**⏱ Duration:** `{duration}`\n🧸 **Request by:** {requester}",
-                            )
-                            await idle()
-                            remove_if_exists(image)
-                        except Exception as ep:
-                            await suhu.delete()
-                            await remove_active_chat(chat_id)
-                            await m.reply_text(f"🚫 error: `{ep}`")
+
+        file_name = get_file_name(audio)
+        title = file_name
+        thumb_name = "https://telegra.ph/file/6ec943f869d06077bc4b7.jpg"
+        thumbnail = thumb_name
+        duration = round(audio.duration / 60)
+        views = "Locally added"
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("•🗣️ Sᴜᴘᴘᴏʀᴛ•", url="t.me/SHIZUKA_SUPPORT"),
+                    InlineKeyboardButton("•📣 Uᴘᴅᴀᴛᴇs•", url="t.me/SHIZUKA_UPDATES"),
+                ],
+                [
+                    InlineKeyboardButton("•Oᴡɴᴇʀ•", url="t.me/pratheek06"),
+                ]
+            ]
+        )
+
+        requested_by = message.from_user.first_name
+        await generate_cover(requested_by, title, views, duration, thumbnail)
+        file_path = await converter.convert(
+            (await message.reply_to_message.download(file_name))
+            if not path.isfile(path.join("downloads", file_name))
+            else file_name
+        )
+
+    elif url:
+        try:
+            results = YoutubeSearch(url, max_results=1).to_dict()
+            # print results
+            title = results[0]["title"]
+            thumbnail = results[0]["thumbnails"][0]
+            thumb_name = f"thumb{title}.jpg"
+            thumb = requests.get(thumbnail, allow_redirects=True)
+            open(thumb_name, "wb").write(thumb.content)
+            duration = results[0]["duration"]
+            url_suffix = results[0]["url_suffix"]
+            views = results[0]["views"]
+            durl = url
+            durl = durl.replace("youtube", "youtubepp")
+
+            secmul, dur, dur_arr = 1, 0, duration.split(":")
+            for i in range(len(dur_arr) - 1, -1, -1):
+                dur += int(dur_arr[i]) * secmul
+                secmul *= 60
+
+            keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("•🗣️ Sᴜᴘᴘᴏʀᴛ•", url="t.me/SHIZUKA_SUPPORT"),
+                    InlineKeyboardButton("•📣 Uᴘᴅᴀᴛᴇs•", url="t.me/SHIZUKA_UPDATES"),
+                ],
+                [
+                    InlineKeyboardButton("•Oᴡɴᴇʀ•", url="t.me/pratheek06"),
+                ]
+            ]
+        )
+        except Exception as e:
+            title = "NaN"
+            thumb_name = "https://telegra.ph/file/6ec943f869d06077bc4b7.jpg"
+            duration = "NaN"
+            views = "NaN"
+            keyboard = InlineKeyboardMarkup(
+                [[InlineKeyboardButton(text="YouTube 🎬", url="https://youtube.com")]]
+            )
+            
+        if (dur / 60) > DURATION_LIMIT:
+            await lel.edit(
+                f"⚠️ **ʜᴇʏ ʏᴏᴜʀ sᴏɴɢ ᴅᴜʀᴀᴛɪᴏɴ ɪs {DURATION_LIMIT} ᴍɪɴᴜᴛᴇs, & ᴛʜɪs ɪs ɴᴏᴛ ᴀʟʟᴏᴡᴇᴅ ᴛᴏ ᴘʟᴀʏ**"
+            )
+            return
+        requested_by = message.from_user.first_name
+        await generate_cover(title, thumbnail)
+        file_path = await converter.convert(youtube.download(url))
+    else:
+        if len(message.command) < 2:
+            return await lel.edit("🎵 **ʜᴇʏ ᴛʏᴘᴇ ᴛʜᴇ sᴏɴɢ ɴᴀᴍᴇ ʙʀᴜʜ...**")
+        await lel.edit("🔍 **ᴄᴏɴɴᴇᴄᴛɪɴɢ ᴛᴏ ᴘʀᴀᴛʜᴇᴇᴋ's sᴇʀᴠᴇʀ...**")
+        query = message.text.split(None, 1)[1]
+        # print(query)
+        await lel.edit("🔍 **ᴘʟᴀʏɪɴɢ ᴠɪᴀ ᴘʀᴀᴛʜᴇᴇᴋ's sᴇʀᴠᴇʀ...**")
+        try:
+            results = YoutubeSearch(query, max_results=1).to_dict()
+            url = f"https://youtube.com{results[0]['url_suffix']}"
+            # print results
+            title = results[0]["title"]
+            thumbnail = results[0]["thumbnails"][0]
+            thumb_name = f"thumb{title}.jpg"
+            thumb = requests.get(thumbnail, allow_redirects=True)
+            open(thumb_name, "wb").write(thumb.content)
+            duration = results[0]["duration"]
+            url_suffix = results[0]["url_suffix"]
+            views = results[0]["views"]
+            durl = url
+            durl = durl.replace("youtube", "youtubepp")
+
+            secmul, dur, dur_arr = 1, 0, duration.split(":")
+            for i in range(len(dur_arr) - 1, -1, -1):
+                dur += int(dur_arr[i]) * secmul
+                secmul *= 60
+
+        except Exception as e:
+            await lel.edit("⚠️ **sᴏʀʀʏ sᴏɴɢ ɴᴀᴍᴇ ᴡᴀs ᴡʀᴏɴɢ, ᴛʀʏ ᴀɴᴏᴛʜᴇʀ sᴏɴɢ ᴏʀ sᴘᴇʟʟ ɪᴛ ᴘʀᴏᴘᴇʀʟʏ** 😾😒")
+            print(str(e))
+            return
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("•🗣️ Sᴜᴘᴘᴏʀᴛ•", url="t.me/SHIZUKA_SUPPORT"),
+                    InlineKeyboardButton("•📣 Uᴘᴅᴀᴛᴇs•", url="t.me/SHIZUKA_UPDATES"),
+                ],
+                [
+                    InlineKeyboardButton("•Oᴡɴᴇʀ•", url="t.me/pratheek06"),
+                ]
+            ]
+        )
+
+        if (dur / 60) > DURATION_LIMIT:
+            await lel.edit(
+                f"🙃 **ʜᴇʏ ʏᴏᴜʀ sᴏɴɢ ᴅᴜʀᴀᴛɪᴏɴ ɪs {DURATION_LIMIT} ᴍɪɴᴜᴛᴇs, & ᴛʜɪs ɪs ɴᴏᴛ ᴀʟʟᴏᴡ ᴛᴏ ᴘʟᴀʏ** ️🤞"
+            )
+            return
+        requested_by = message.from_user.first_name
+        await generate_cover(requested_by, title, views, duration, thumbnail)
+        file_path = await converter.convert(youtube.download(url))
+ 
+    ACTV_CALLS = []
+    chat_id = message.chat.id
+    for x in callsmusic.pytgcalls.active_calls:
+        ACTV_CALLS.append(int(x.chat_id))
+    if int(message.chat.id) in ACTV_CALLS:
+        position = await queues.put(message.chat.id, file=file_path)
+        await message.reply_photo(
+            photo="final.png",
+            caption=f"🏷 **ꜱᴏɴɢ ᴀᴅᴅᴇᴅ ᴛᴏ Qᴜᴇᴜᴇ »** `{position}`\n\n🏷 **ɴᴀᴍᴇ:** [{title[:80]}]({url})\n⏱ **ᴅᴜʀᴀᴛɪᴏɴ:** `{duration}`\n🎧 **ᴀᴅᴅᴇᴅ ʙʏ:** {message.from_user.mention}",
+            reply_markup=keyboard,
+        )
+        os.remove("final.png")
+        return await lel.delete()
+    else:
+        await callsmusic.pytgcalls.join_group_call(
+                chat_id, 
+                InputStream(
+                    InputAudioStream(
+                        file_path,
+                    ),
+                ),
+                stream_type=StreamType().local_stream,
+            )
+
+        await message.reply_photo(
+            photo="final.png",
+            caption=f"☑️ **ɴᴀᴍᴇ:** [{title[:80]}]({url})\n⏱ **ᴅᴜʀᴀᴛɪᴏɴ:** `{duration}`\n💡 **ꜱᴛᴀᴛᴜꜱ:** `ᴘʟᴀʏɪɴɢ`\n"
+            + f"🎧 **ᴀᴅᴅᴇᴅ ʙʏ:** {message.from_user.mention}",
+            reply_markup=keyboard,
+        )
+        os.remove("final.png")
+        return await lel.delete()
