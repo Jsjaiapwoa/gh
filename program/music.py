@@ -75,9 +75,14 @@ async def generate_cover(requested_by, title, views, duration, thumbnail):
                 await f.write(await resp.read())
                 await f.close()
 
+    async def generate_cover(title, thumbnail, ctitle):
+    async with aiohttp.ClientSession() as session, session.get(thumbnail) as resp:
+          if resp.status == 200:
+              f = await aiofiles.open("background.png", mode="wb")
+              await f.write(await resp.read())
+              await f.close()
     image1 = Image.open("./background.png")
-    FOREGROUND_THUMBNAIL = random.choice(FOREGROUND_IMG)
-    image2 = Image.open(FOREGROUND_THUMBNAIL)
+    image2 = Image.open("etc/foreground.png")
     image3 = changeImageSize(1280, 720, image1)
     image4 = changeImageSize(1280, 720, image2)
     image5 = image3.convert("RGBA")
@@ -86,12 +91,13 @@ async def generate_cover(requested_by, title, views, duration, thumbnail):
     img = Image.open("temp.png")
     draw = ImageDraw.Draw(img)
     font = ImageFont.truetype("etc/regular.ttf", 52)
-    font2 = ImageFont.truetype("etc/medium.ttf", 76)     
-    draw.text((27, 535), f"Powered By: PratheekBots...", fill="black", font=font)
-    draw.text((25, 610), f"{title[:18]}...", fill= "black", font=font2)
+    font2 = ImageFont.truetype("etc/medium.ttf", 76)
+    draw.text((27, 538), f"Playing on {ctitle[:8]}..", (0, 0, 0), font=font)
+    draw.text((27, 612), f"{title[:18]}...", (0, 0, 0), font=font2)
     img.save("final.png")
     os.remove("temp.png")
     os.remove("background.png")
+
 
 @Client.on_message(
     command("Maintainence") & ~filters.edited & ~filters.bot & ~filters.private
