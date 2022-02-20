@@ -4,8 +4,6 @@ from os import path
 from pyrogram import Client, filters
 from pyrogram.types import Message, Voice, InlineKeyboardButton, InlineKeyboardMarkup
 from pyrogram.errors import UserAlreadyParticipant
-from callsmusic import callsmusic, queues
-from callsmusic.callsmusic import client as USER
 from driver.admins import get_administrators
 import requests
 import aiohttp
